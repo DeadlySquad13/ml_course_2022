@@ -131,6 +131,7 @@ celerybeat.pid
 .venv
 # - For windows.
 .venv_win
+
 env/
 venv/
 ENV/
