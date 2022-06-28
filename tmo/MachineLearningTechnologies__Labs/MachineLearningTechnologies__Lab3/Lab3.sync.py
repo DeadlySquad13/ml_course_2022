@@ -272,8 +272,13 @@ knn_pipeline = Pipeline([
     ( 'model', knn_classifier ),
 ])
 
+# Здесь и далее во время обучения нам потребуется "распутывать" выборку целевых
+# признаков, поэтому перезапишем переменную:
+star_types_train_raveled =-star_types_train.values.ravel()
+
+
 star_types_predicted = knn_pipeline.fit(star_features_train,
-                   star_types_train.values.ravel()).predict(star_features_test)
+                   star_types_train_raveled).predict(star_features_test)
 # knn_pipeline.score(star_types_predicted, star_types_test.values.ravel())
 accuracy_score(star_types_predicted, star_types_test)
 
@@ -284,6 +289,30 @@ accuracy_score(star_types_predicted, star_types_test)
 # ## Произведите подбор гиперпараметра K с использованием GridSearchCV и/или RandomizedSearchCV и кросс-валидации, оцените качество оптимальной модели.
 # Желательно использование нескольких стратегий кросс-валидации.
 
+# %%
+# Метрики будем складывать в этот словарь для дальнейшего сравнительного
+#   анализа.
+metrics_data = {}
+
+import re
+def add_metrics_data_from_search_results(results, search_strategy='GridSearchCV'):
+    for result, value in results.items():
+        metric_match = re.match(r'mean_test_(.+)', result)
+        if metric_match:
+            metric_name = metric_match.group(1)
+            metrics_data[search_strategy][metric_name] = max(value)
+
+# %% [markdown]
+# Метрики, которые мы будем использовать:
+
+# %%
+metrics=(
+    'accuracy',
+    'f1_weighted',
+    'precision_weighted',
+    'recall_weighted',
+)
+
 # %% [markdown]
 ### С помощью GridSearchCV
 
@@ -291,15 +320,19 @@ accuracy_score(star_types_predicted, star_types_test)
 %%time
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import KFold
-from sklearn.metrics import SCORERS
+
+# Метрики модели.
+metrics_data['GridSearchCV'] = {}
 
 params = { 'model__n_neighbors': np.arange(1, 30, 1) }
 
-display(sorted(SCORERS.keys()))
-grid_search = GridSearchCV(knn_pipeline, params, cv=KFold(n_splits=10),
-                           scoring='accuracy')
+grid_search = GridSearchCV(knn_pipeline, params, cv=KFold(n_splits=3),
+                           scoring=metrics, refit='f1_weighted')
 
-grid_search.fit(star_features_train, star_types_train.values.ravel())
+grid_search.fit(star_features_train, star_types_train_raveled)
+
+add_metrics_data_from_search_results(grid_search.cv_results_)
+
 display(grid_search.best_score_, grid_search.best_params_)
 
 # %% [markdown]
@@ -309,39 +342,62 @@ display(grid_search.best_score_, grid_search.best_params_)
 %%time
 from sklearn.model_selection import RandomizedSearchCV
 
-randomized_search = RandomizedSearchCV(knn_pipeline, params,
-                                       cv=KFold(n_splits=10),
-                                       scoring='accuracy')
+# Метрики модели.
+metrics_data['RandomizedSearchCV'] = {}
 
-randomized_search.fit(star_features_train, star_types_train.values.ravel())
+randomized_search = RandomizedSearchCV(knn_pipeline, params,
+                                       cv=KFold(n_splits=3),
+                                       scoring=metrics,
+                                       refit='f1_weighted')
+
+randomized_search.fit(star_features_train, star_types_train_raveled)
+
+add_metrics_data_from_search_results(randomized_search.cv_results_,
+                                     search_strategy='RandomizedSearchCV')
+
 display(grid_search.best_score_, grid_search.best_params_)
+
+# %% [markdown]
+### С помощью кросс-валидации (`cross_validate`)
+
+# %%
+from sklearn.model_selection import cross_validate
+from sklearn.preprocessing import label_binarize
+
+metrics_data['cross_validate'] = {}
+
+
+# Для осуществления работы cross_validate с мультиклассами, необходимо
+# их преобразовать one hot encode`ом.
+star_types_train_binarized = label_binarize(star_types, # Должно быть unravel.
+                                            classes=[0, 1, 2, 3, 4, 5])
+
+display(star_types_train_binarized)
+cross_validate_results = cross_validate(knn_pipeline,
+                           star_features, star_types.values.ravel(),
+                           cv=3, scoring=metrics,
+                           )
+
+import re
+def add_metrics_data_from_cross_validate_results(cross_validate_results):
+    for result, value in cross_validate_results.items():
+        metric_match = re.match(r'test_(.+)', result)
+        if metric_match:
+            metric_name = metric_match.group(1)
+            metrics_data['cross_validate'][metric_name] = min(value)
+
+display(cross_validate_results)
+add_metrics_data_from_cross_validate_results(cross_validate_results)
+# metrics_data['cross_validate']['precision_weighted'] = cross_val['test_precision_weighted']
+# metrics_data['cross_validate']['recall_weighted'] = cross_val['test_recall_weighted']
 
 # %% [markdown]
 # ## Сравните метрики качества исходной и оптимальной моделей
 
 # %%
-def plot_hyperparam_curve(models):
-    plt.title('Сравнение метрик моделей')
-    plt.xlabel('Метрика')
-    plt.ylabel('Значение')
-    delta = np.ones(3) * -0.2
-    bar_width = 0.2
-
-    for model_name, (metrics, metric_values) in models.items():
-        plt.bar(metrics + delta, metric_values, label=model_name,
-                width=bar_width)
-        delta += bar_width
-
-
-    ax = plt.figure().add_subplot()
-    ax.set_xticklabels( ('2011-Jan-4', '2011-Jan-5', '2011-Jan-6') )
-    plt.legend(loc="best")
-    return plt
-
-
 from typing import Dict
 
-def grouped_bar_chart(ax, data: Dict[str, List[Union[int, np.nan]]],
+def grouped_bar_chart(ax, data: Dict[str, List[float]],
                       tick_labels, colors=None, total_width=0.8,
              single_width=1):
     """Draws a bar plot with multiple bars per data point.
@@ -351,7 +407,7 @@ def grouped_bar_chart(ax, data: Dict[str, List[Union[int, np.nan]]],
     ax: matplotlib.pyplot.axis
         The axis we want to draw our plot on.
 
-    data: Dict[str, List[Union[int, np.nan]]]
+    data: Dict[str, List[float]]
         A dictionary containing the data we want to plot. Keys are the names of the
         data, the items is a list of the values.
 
@@ -411,16 +467,16 @@ def grouped_bar_chart(ax, data: Dict[str, List[Union[int, np.nan]]],
         # Add a handle to the last drawn bar, which we'll need for the legend.
         # bars.append(bars[0])
 
-        ax.bar_label(rects)
+        ax.bar_label(rects, padding=3, label_type='center', rotation=90)
 
     ax.set_xticks(tick_locations, labels=tick_labels)
 
 
-def show_metrics_grouped_bar_chart(metrics_data: Dict[str, Dict[str, int]]):
+def show_metrics_grouped_bar_chart(metrics_data: Dict[str, Dict[str, float]]):
     """ Creates grouped bar chart for metrics.
     :param metrics_data: a dictionary of metrics and their values for each
         model.
-    :type metrics_data: Dict[str, Dict[str, int]]
+    :type metrics_data: Dict[str, Dict[str, float]]
 
         Example:
 
@@ -438,10 +494,10 @@ def show_metrics_grouped_bar_chart(metrics_data: Dict[str, Dict[str, int]]):
         }
 
     """
-    plt.figure(figsize=(4,1))
-    # width = 15
-    # height = 15
-    # plt.rcParams['figure.figsize'] = width, height
+    # plt.figure(figsize=(7,3))
+    width = 15
+    height = 15
+    plt.rcParams['figure.figsize'] = width, height
 
     fig, ax = plt.subplots()
 
@@ -476,29 +532,17 @@ def show_metrics_grouped_bar_chart(metrics_data: Dict[str, Dict[str, int]]):
             
     
     grouped_bar_chart(ax, filled_metrics_data, tick_labels=tick_labels,
-                      total_width=.8, single_width=.9)
+                      total_width=.8, single_width=.9, colors=['#aadddd',
+                          '#eebbbb', '#ccbbbb', '#77bb77'])
 
     plt.title('Сравнение метрик качества моделей')
     plt.xlabel('Метрика')
     plt.ylabel('Значение метрики')
 
-    ax.legend(title='Модели')
+    ax.legend(title='Стратегия', bbox_to_anchor=(1.2, 1))
+
     plt.show()
 
 
-metrics_data = {
-    'GridSearchCV': { 
-        'Accuracy': 1,
-        'a': 2,
-        'b': 3,
-    },
-    'RandomSearchCV': {
-        'Roc': 2,
-        'a': 3,
-        'b': 4,
-    },
-}
-
-metrics_data['GridSearchCV']['Accuracy'] = 1
-
+# %%
 show_metrics_grouped_bar_chart(metrics_data)
