@@ -200,35 +200,87 @@ plt.show()
 # признак Fuel_Price.
 
 # %%
-# Удаление лишних колонок
+# Удаление лишних колонок.
 walmart_without_linear_correlates = walmart.drop(columns=['Month', 'Year'])
 walmart_without_linear_correlates.head()
 
-
+# %%
+# Так как SVM модель чувствительна к выбросам построим графики ящиков с усами.
 
 # %%
-# Извлекаем целевой признак.
-TARGET_COL_NAMES = ['Weekly_Sales']
-walmart_weekly_sales = walmart[TARGET_COL_NAMES]
+# Ящик с усами для столбца Temperature.
 
-walmart_features = walmart.drop(columns=TARGET_COL_NAMES)
-display(walmart_weekly_sales, walmart_features)
+# Не заносим бинарные признаки и даты.
+PURELY_NUMERICAL_COL_NAMES = (
+    'Temperature',
+    'Fuel_Price',
+    'CPI',
+    'Unemployment',
+    'Weekly_Sales',
+)
 
-# %%
-# Перед использованием модели закодируем категориальные признаки с помощью
-# one-hot encoding, где каждое уникальное значение признака становится новым
-# признаком. Это позволяет избежать фиктивного отношения порядка.
-
-# %%
-# categorical_pipeline = Pipeline([
-    # ( 'one-hot', DataFrameOneHotEncoder(handle_unknown='ignore') )
-# ])
-# CATEGORICAL_COL_NAMES = ['Color', 'Spectral_Class']
-# # Returns tuple: (2d-array with columns?, shape).
-# caterogical_star_features = categorical_pipeline.fit_transform(walmart[CATEGORICAL_COL_NAMES]),
-# caterogical_star_features = pd.DataFrame(caterogical_star_features[0])
+for col_name in PURELY_NUMERICAL_COL_NAMES:
+    sns.boxplot(x=walmart_without_linear_correlates[col_name])
+    plt.show()
 
 # %% [markdown]
+# Наблюдаем большое количество выбросов в колонках с признаками 'Temperature',
+# 'Unemployment' и 'Weekly_Sales'.
+
+# %% [markdown]
+# ## Очистка выбросов.
+
+# %%
+# Очистка столбца Temperature.
+Q1, Q3 = walmart['Temperature'].quantile([0.25, 0.75])
+IQR = Q3 - Q1
+min_limit = Q1 - 1.5*IQR
+max_limit = Q3 + 1.5*IQR
+
+walmart_without_outliers = walmart_without_linear_correlates[
+    (walmart_without_linear_correlates['Temperature']
+    > min_limit) & (walmart_without_linear_correlates['Temperature'] < max_limit)
+]
+walmart_without_outliers.shape
+
+# %%
+# Очистка столбца Unemployment.
+Q1, Q3 = walmart['Unemployment'].quantile([0.25, 0.75])
+IQR = Q3 - Q1
+min_limit = Q1 - 1.3*IQR
+max_limit = Q3 + 1.3*IQR
+
+walmart_without_outliers = walmart_without_outliers[(walmart_without_outliers['Unemployment'] > min_limit)
+                                              & (walmart_without_outliers['Unemployment'] < max_limit)]
+walmart_without_outliers.shape
+
+# %%
+# Очистка столбца Weekly_Sales.
+Q1, Q3 = walmart['Weekly_Sales'].quantile([0.25, 0.75])
+IQR = Q3 - Q1
+min_limit = Q1 - 1.5*IQR
+max_limit = Q3 + 1.5*IQR
+
+walmart_without_outliers = walmart_without_outliers[(walmart_without_outliers['Weekly_Sales'] > min_limit)
+                                              & (walmart_without_outliers['Weekly_Sales'] < max_limit)]
+walmart_without_outliers.shape
+
+# %% [markdown]
+# Посмотрим на результат очистки:
+
+# %%
+# Ящик с усами для столбца Temperature.
+sns.boxplot(x=walmart_without_outliers['Temperature'])
+plt.show()
+# Ящик с усами для столбца Unemployment.
+sns.boxplot(x=walmart_without_outliers['Unemployment'])
+plt.show()
+# Ящик с усами для столбца Weekly_Sales.
+sns.boxplot(x=walmart_without_outliers['Weekly_Sales'])
+plt.show()
+
+# %% [markdown]
+# ## Масштабирование
 # Нам также потребуется масштабировать данные для адекватной работы моделей (и
 # линейные , и SVM работают лучше, если  признаки представлены в одном
 # масштабе).
@@ -239,10 +291,20 @@ preprocessor = Pipeline([
 ])
 
 
-walmart_features_transformed = preprocessor.fit_transform(walmart_features)
+walmart_transformed = preprocessor.fit_transform(walmart_without_outliers)
 # Массив переводим обратно в датафрейм.
-walmart_features_transformed = pd.DataFrame(walmart_features_transformed,
-                                            columns=walmart_features.columns)
+walmart_transformed = pd.DataFrame(walmart_transformed,
+                                            columns=walmart_without_outliers.columns)
+walmart_transformed
+
+# %%
+# Извлекаем целевой признак.
+TARGET_COL_NAMES = ['Weekly_Sales']
+walmart_weekly_sales = walmart_transformed[TARGET_COL_NAMES]
+
+walmart_features = walmart_transformed.drop(columns=TARGET_COL_NAMES)
+display(walmart_features, walmart_weekly_sales)
+
 # %% [markdown]
 # ## С использованием метода train_test_split разделите выборку на обучающую и тестовую.
 
@@ -356,6 +418,7 @@ def add_metrics_data(model_name, model_metric_data):
 # %%
 %%time
 from sklearn.linear_model import LinearRegression
+from sklearn.compose import ColumnTransformer
 
 linear_regression = LinearRegression()
 
@@ -429,65 +492,130 @@ polynomial_regression_pipeline.fit(walmart_features_train,
 add_metrics_data_from_search_results(polynomial_regression_pipeline.cv_results_,
                                      model='PolynomialRegression')
 
-display(polynomial_regression_pipeline.cv_results_)
 display(polynomial_regression_pipeline.best_score_,
         polynomial_regression_pipeline.best_params_)
 
 # %% [markdown]
 # ## 2 Метод опорных векторов (SVM)
+# У линейной регресси на опорных векторах есть гиперпараметр C,
+# обозначающий силу регуляризации. Его подберём также с помощью
+# RandomizedSearchCV.
 
 # %%
 %%time
 from sklearn.svm import LinearSVR
 
-linear_regression = LinearRegression()
-polynomial_features = PolynomialFeatures()
+# Параметр регуляризации должен быть строго положителен.
+parameters_to_tune = { 'model__C': np.logspace(1e-5, 1, num=10) }
 
-polynomial_regression_pipeline = Pipeline([
+linear_svr = LinearSVR(max_iter=10_000)
+
+linear_svr_estimator = Pipeline([
     ( 'preprocess', preprocessor ),
-    ( 'poly_features', polynomial_features ),
-    ( 'model', linear_regression ),
+    ( 'model', linear_svr ),
 ])
 
-walmart_weekly_sales_predicted = polynomial_regression_pipeline.fit(walmart_features_train,
-                   walmart_weekly_sales_train).predict(walmart_features_test)
-polynomial_regression_score = score(walmart_weekly_sales_predicted, walmart_weekly_sales_test)
-add_metrics_data('PolynomialRegression', polynomial_regression_score)
-display_score(polynomial_regression_score)
+linear_svr_pipeline = RandomizedSearchCV(linear_svr_estimator,
+                                         parameters_to_tune,
+                                         scoring=scoring,
+                                         refit=scoring[2]
+                                        )
+linear_svr_pipeline.fit(walmart_features_train,
+               walmart_weekly_sales_train.values.ravel()).predict(walmart_features_test)
+add_metrics_data_from_search_results(linear_svr_pipeline.cv_results_,
+                                     model='LinearSVR')
+display(linear_svr_pipeline.best_score_,
+        linear_svr_pipeline.best_params_)
 
 # %% [markdown]
-### С помощью кросс-валидации (`cross_validate`)
+# ## 3 Дерево решений
+
+# %% [markdown]
+# Деревья нечувствительны к математическому ожиданию признаков, поэтому
+# попробуем провести исследование на неотмасштабированных данных.
+# Разделим неотмасштабированные данные на обучающую и тестовую выборки:
 
 # %%
-from sklearn.model_selection import cross_validate
-from sklearn.preprocessing import label_binarize
+walmart_weekly_sales = walmart_without_outliers[TARGET_COL_NAMES]
 
-metrics_data['cross_validate'] = {}
+walmart_features = walmart_without_outliers.drop(columns=TARGET_COL_NAMES)
 
+walmart_features_train: pd.DataFrame
+walmart_features_test: pd.DataFrame
+walmart_weekly_sales_train: pd.Series
+walmart_weekly_sales_test: pd.Series
 
-# Для осуществления работы cross_validate с мультиклассами, необходимо
-# их преобразовать one hot encode`ом.
-star_types_train_binarized = label_binarize(star_types, # Должно быть unravel.
-                                            classes=[0, 1, 2, 3, 4, 5])
+# Параметр random_state позволяет задавать базовое значение для генератора
+# случайных чисел. Это делает разбиение неслучайным. Если задается параметр
+# random_state то результаты разбиения будут одинаковыми при различных
+# запусках. На практике этот параметр удобно использовать для создания
+# "устойчивых" учебных примеров, которые выдают одинаковый результат при
+# различных запусках.
+RANDOM_STATE_SEED = 1
 
-display(star_types_train_binarized)
-cross_validate_results = cross_validate(knn_pipeline,
-                           star_features, star_types.values.ravel(),
-                           cv=3, scoring=scoring,
-                           )
+walmart_features_train, walmart_features_test, walmart_weekly_sales_train, walmart_weekly_sales_test = train_test_split(
+    walmart_features, walmart_weekly_sales, random_state=RANDOM_STATE_SEED)
 
-import re
-def add_metrics_data_from_cross_validate_results(cross_validate_results):
-    for result, value in cross_validate_results.items():
-        metric_match = re.match(r'test_(.+)', result)
-        if metric_match:
-            metric_name = metric_match.group(1)
-            metrics_data['cross_validate'][metric_name] = min(value)
+# %%
+# Гиперпараметры для оптимизации
+parameters_to_tune = {'model__max_depth' : [3, 4, 5, 6, 7, 8],
+                      'model__min_samples_leaf' : np.linspace(0.01, 0.1, 10),
+                      'model__max_features' : [0.2 , 0.4, 0.6, 0.8, 'auto', 'sqrt', 'log2']}
 
-display(cross_validate_results)
-add_metrics_data_from_cross_validate_results(cross_validate_results)
-# metrics_data['cross_validate']['precision_weighted'] = cross_val['test_precision_weighted']
-# metrics_data['cross_validate']['recall_weighted'] = cross_val['test_recall_weighted']
+# %%
+%%time
+from sklearn.tree import DecisionTreeRegressor
+
+decision_tree_regressor = DecisionTreeRegressor(criterion='absolute_error',
+                                                random_state=RANDOM_STATE_SEED)
+
+decision_tree_regressor_estimator = Pipeline([
+    ( 'preprocess', preprocessor ),
+    ( 'model', decision_tree_regressor ),
+])
+
+# Оптимизация гиперпараметров
+decision_tree_regressor_pipeline = RandomizedSearchCV(
+                                         decision_tree_regressor_estimator,
+                                         parameters_to_tune,
+                                         cv=5,
+                                         scoring=scoring,
+                                         refit=scoring[0]
+                                        )
+
+decision_tree_regressor_pipeline.fit(walmart_features_train,
+               walmart_weekly_sales_train.values.ravel()).predict(walmart_features_test)
+add_metrics_data_from_search_results(decision_tree_regressor_pipeline.cv_results_,
+                                     model='DecisionTreeRegressor')
+display(abs(decision_tree_regressor_pipeline.best_score_),
+        decision_tree_regressor_pipeline.best_params_)
+
+# %% [markdown]
+# Генерация графа дерева с помощью библиотеки graphviz.
+
+# %%
+from sklearn.tree import export_graphviz
+import graphviz
+
+# Выбираем наше дерево из конвейера.
+best_decision_tree_estimator = decision_tree_regressor_pipeline.best_estimator_
+best_decision_tree_regressor = best_decision_tree_estimator.fit(walmart_features_train,
+                                 walmart_weekly_sales_train
+                                ).named_steps['model']
+
+# %%
+dot_data = export_graphviz(best_decision_tree_regressor,
+                           feature_names=list(walmart_features_train.columns),
+                           filled=True, rounded=True, special_characters=True,
+                           rotate=False)
+
+graph = graphviz.Source(dot_data, format='svg', directory='images', filename='graph', engine='dot')
+graph.render()
+
+# %%
+# Визуализация дерева с помощью графа
+from IPython.core.display import HTML
+HTML('<img src="images/graph.svg" width=100%>')
 
 # %% [markdown]
 # ## Сравните метрики качества исходной и оптимальной моделей
